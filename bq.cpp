@@ -122,8 +122,8 @@ protected:
 class BQ_TBB {
 public:
     BQ_TBB()
-        : lock_in()
-        , lock_out()
+        : mutex_in()
+        , mutex_out()
         , pq_in(nullptr)
         , pq_out(nullptr)
         , s_in(0)
@@ -133,13 +133,14 @@ public:
     }
 
     virtual ~BQ_TBB()
-    {                
-        out_lock();
-        in_lock();
+    {        
+        tbb::mutex::scoped_lock lock_in,lock_out;
+        lock_out.acquire(mutex_out);
+        lock_in.acquire(mutex_in);
         delete[] pq_in;
         delete[] pq_out;
-        in_unlock();
-        out_unlock();
+        lock_in.release();
+        lock_out.release();
     }
 
     bool                pop_msg(Msg_ptr & msg)
@@ -147,14 +148,15 @@ public:
         //lock_out.lock();
         if (s_out == 0)
         {
-            in_lock();
+            tbb::mutex::scoped_lock lock_in;
+            lock_in.acquire(mutex_in);
             MQ_t t = pq_in;
             pq_in = pq_out;
             pq_out = t;
             size_t ts = s_in;
             s_in = s_out;
             s_out = ts;
-            in_unlock();
+            lock_in.release();
         }
         if(s_out == 0) {
             //lock_out.unlock();
@@ -166,45 +168,29 @@ public:
         return true;
     }
 
-//     tbb::mutex &    in_lock() {
-//         return lock_in;
-//     }
-//     tbb::mutex &    out_lock() {
-//         return lock_out;
-//     }
-    
-    void in_lock(void) {
-        lock_in.acquire(mutex_in);
+    tbb::mutex &    in_mutex() {
+        return mutex_in;
     }
-    
-    void in_unlock(void) {
-        lock_in.release();
-    }
-    
-    void out_lock(void) {
-        lock_out.acquire(mutex_out);
-    }
-    
-    void out_unlock(void) {
-        lock_out.release();
+    tbb::mutex &    out_mutex() {
+        return mutex_out;
     }
 
-
-    bool                push_msg(Msg_ptr &msg)
+    bool                push_msg(Msg_ptr &msg, tbb::mutex::scoped_lock& lock_in)
     {
         //lock_in.lock();
         if(s_in == MQ_LEN)
         {
-            in_unlock();
-            out_lock();
-            in_lock();
+            lock_in.release();
+            tbb::mutex::scoped_lock lock_out;
+            lock_out.acquire(mutex_out);
+            lock_in.acquire(mutex_in);
             MQ_t t = pq_in;
             pq_in = pq_out;
             pq_out = t;
             size_t ts = s_in;
             s_in = s_out;
             s_out = ts;
-            out_unlock();
+            lock_out.release();
         }
         if(s_in == MQ_LEN)
         {
@@ -222,8 +208,8 @@ protected:
 
     tbb::mutex      mutex_in;
     tbb::mutex      mutex_out;
-    tbb::mutex::scoped_lock lock_in;
-    tbb::mutex::scoped_lock lock_out;
+//     tbb::mutex::scoped_lock lock_in;
+//     tbb::mutex::scoped_lock lock_out;
     MQ_t                pq_in;
     MQ_t                pq_out;
     size_t      s_in;
@@ -257,13 +243,14 @@ void parallel_bq(int msg_num, int thrd_num, BQ_TBB & bq)
         int m = dist(dre);
 
         tg.run([&bq, m]() {
-            bq.in_lock();
+            tbb::mutex::scoped_lock lock_in;
+            lock_in.acquire(bq.in_mutex());
             for(int i = 0; i < m; i ++)
             {
                 Msg_ptr msg = std::make_shared<Msg>();
-                bq.push_msg(msg);
+                bq.push_msg(msg,lock_in);
             }
-            bq.in_unlock();
+            lock_in.release();
         });
 
         iMsg_num += m;
@@ -273,13 +260,14 @@ void parallel_bq(int msg_num, int thrd_num, BQ_TBB & bq)
         int n = ndist(e2);
 
         tg.run([&bq, n]() {
-            bq.out_lock();
+            tbb::mutex::scoped_lock lock_out;
+            lock_out.acquire(bq.out_mutex());
             for(int i = 0; i<n; ++i)
             {
                 Msg_ptr msg;
                 bq.pop_msg(msg);
             }
-            bq.out_unlock();
+            lock_out.release();
         });
     }
     tg.wait();
